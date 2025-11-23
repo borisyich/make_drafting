@@ -12,6 +12,12 @@ The main ideas:
 
 ---
 
+Basic part analysis: 
+1 conda activate occ_env
+2 C:\Users\dreck\Documents\make_drafting\src>python -m afr3d ..\data\example_complex.stp
+'''
+---
+
 ## 0. Technology Stack
 
 - **OCCT + pythonOCC** – geometric kernel and 3D topology:

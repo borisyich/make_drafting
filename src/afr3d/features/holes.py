@@ -14,6 +14,7 @@ from afr3d.geom.primitives import (
     PlanarFaceInfo,
     ConicalFaceInfo,
     CylindricalFaceInfo,
+    CylindricalFeature,
     dist_between_axes,
     vec_angle,
     vec_dot,
@@ -58,11 +59,11 @@ class HoleAFR:
 
 
 def cluster_hole_features_by_axis(
-    hole_features: List["CylindricalFeature"],
+    hole_features: List[CylindricalFeature],
     ang_tol_rad: float = math.radians(1.0),
     axis_dist_tol: float = 0.5,
 ):
-    clusters: List[List["CylindricalFeature"]] = []
+    clusters: List[List[CylindricalFeature]] = []
     for feat in hole_features:
         added = False
         for cluster in clusters:
@@ -110,7 +111,7 @@ def classify_hole_through_blind(
 
 def detect_holes_afr(
     shape,
-    hole_features: List["CylindricalFeature"],
+    hole_features: List[CylindricalFeature],
     planar_faces: List[PlanarFaceInfo],
     adj: Dict[int, set[int]],
     conical_faces: List[ConicalFaceInfo],

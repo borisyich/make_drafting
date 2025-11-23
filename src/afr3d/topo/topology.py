@@ -9,6 +9,7 @@ from OCC.Core.Bnd import Bnd_OBB
 from OCC.Core.BRepAdaptor import BRepAdaptor_Surface
 from OCC.Core.BRepBndLib import brepbndlib_AddOBB
 from OCC.Core.BRepGProp import brepgprop_SurfaceProperties
+from OCC.Core.GeomAbs import GeomAbs_Plane, GeomAbs_Cylinder, GeomAbs_Cone
 from OCC.Core.GProp import GProp_GProps
 from OCC.Core.TopAbs import TopAbs_EDGE, TopAbs_FACE, TopAbs_FORWARD, TopAbs_REVERSED
 from OCC.Core.TopExp import TopExp_Explorer, topexp
@@ -92,7 +93,7 @@ def extract_planar_faces(shape: TopoDS_Shape) -> List[PlanarFaceInfo]:
         adaptor = BRepAdaptor_Surface(face, True)
         surf_type = adaptor.GetType()
 
-        if surf_type == 1:  # GeomAbs_Plane
+        if surf_type == GeomAbs_Plane:
             plane = adaptor.Plane()
             normal = plane.Axis().Direction()
             loc = plane.Location()
@@ -139,7 +140,7 @@ def extract_cylindrical_faces(
         adaptor = BRepAdaptor_Surface(face, True)
         surf_type = adaptor.GetType()
 
-        if surf_type == 2:  # GeomAbs_Cylinder
+        if surf_type == GeomAbs_Cylinder:
             cyl = adaptor.Cylinder()
             axis = cyl.Axis()
             radius = cyl.Radius()
@@ -209,7 +210,7 @@ def extract_conical_faces(shape: TopoDS_Shape) -> List[ConicalFaceInfo]:
         face = topods_Face(exp.Current())
         adaptor = BRepAdaptor_Surface(face, True)
 
-        if adaptor.GetType() == 3:  # GeomAbs_Cone
+        if adaptor.GetType() == GeomAbs_Cone:
             cone = adaptor.Cone()
 
             apex = gp_pnt_to_tuple(cone.Apex())

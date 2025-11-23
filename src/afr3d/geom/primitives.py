@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Literal, Optional, Tuple
 
 from OCC.Core.GeomAbs import GeomAbs_Cone, GeomAbs_Cylinder, GeomAbs_Plane
@@ -67,6 +67,21 @@ class CylindricalFaceInfo:
             f"orientation={self.orientation}), "
         )
 
+@dataclass
+class CylindricalFeature:
+    axis_origin: Tuple[float, float, float]
+    axis_dir: Tuple[float, float, float]
+    radius: float
+    face_indices: List[int] = field(default_factory=list)
+    faces: List[CylindricalFaceInfo] = field(default_factory=list)
+
+    def __repr__(self):
+        ox, oy, oz = self.axis_origin
+        dx, dy, dz = self.axis_dir
+        return (f"CylFeature(R={self.radius:.3f}, "
+                f"axis_origin=({ox:.3f},{oy:.3f},{oz:.3f}), "
+                f"axis_dir=({dx:.3f},{dy:.3f},{dz:.3f}), "
+                f"faces={self.face_indices})")
 
 @dataclass
 class ConicalFaceInfo:
