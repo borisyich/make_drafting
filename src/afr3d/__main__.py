@@ -4,13 +4,19 @@ from __future__ import annotations
 
 import argparse
 
-from afr3d.features import analyze_part, extract_features_from_shape
+from afr3d.features import analyze_part
 from afr3d.io.step_import import load_step
+from afr3d.drafting.views import select_main_views, analyze_view_candidates
 
 
 def main():
     parser = argparse.ArgumentParser(description="AFR3D playground: planes + cylinders + holes")
     parser.add_argument("step_file", help="Path to file (.stp/.step)")
+    parser.add_argument(
+        "--show-views",
+        action="store_true",
+        help="Print automatically selected front/top/side view directions",
+    )
     args = parser.parse_args()
 
     shape = load_step(args.step_file)
@@ -43,6 +49,15 @@ def main():
         print(f"  chamfers: {[ (c.face_index, round(c.length,3), round(c.semi_angle_deg,1)) for c in h.chamfers ]}")
         print(f"  opening_faces={h.opening_faces}, bottom_faces={h.bottom_faces}")
 
+    if args.show_views:
+        print("\n=== Automatic view selection (OBB + HLR) ===")
+        view_set = select_main_views(shape)
+        print("Front view dir:", view_set.front.view_dir.X(),
+              view_set.front.view_dir.Y(), view_set.front.view_dir.Z())
+        print("Top view dir:", view_set.top.view_dir.X(),
+              view_set.top.view_dir.Y(), view_set.top.view_dir.Z())
+        print("Side view dir:", view_set.side.view_dir.X(),
+              view_set.side.view_dir.Y(), view_set.side.view_dir.Z())
 
 if __name__ == "__main__":
     main()
