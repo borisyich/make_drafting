@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "afr3d"
+version = "0.1.0"
+description = "Automatic feature recognition and drafting experiments"
+authors = [{ name = "Unknown" }]
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pythonocc-core",
+    "numpy",
+]
+
+[project.optional-dependencies]
+dev = ["jupyter"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
