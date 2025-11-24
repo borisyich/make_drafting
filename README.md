@@ -11,11 +11,15 @@ The main ideas:
 - Optionally, plug this into a reinforcement-learning (RL) environment where an agent decides which views and dimensions to use.
 
 ---
+conda env create -f environment.yml
+
+conda activate oss_env
+python -m ipykernel install --user --name oss_env --display-name "oss_env"
+
 
 Basic part analysis: 
 1 conda activate occ_env
 2 C:\Users\dreck\Documents\make_drafting\src>python -m afr3d ..\data\example_complex.stp
-'''
 ---
 
 ## 0. Technology Stack

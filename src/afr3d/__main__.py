@@ -6,7 +6,7 @@ import argparse
 
 from afr3d.features import analyze_part
 from afr3d.io.step_import import load_step
-from afr3d.drafting.views import select_main_views, analyze_view_candidates
+from afr3d.drafting.views import select_main_views, analyze_view_candidates, extract_solids, plot_base_drafting
 
 
 def main():
@@ -19,7 +19,8 @@ def main():
     )
     args = parser.parse_args()
 
-    shape = load_step(args.step_file)
+    shape_raw = load_step(args.step_file)
+    shape = extract_solids(shape_raw)
 
     part_analysis = analyze_part(shape)
 
@@ -58,6 +59,9 @@ def main():
               view_set.top.view_dir.Y(), view_set.top.view_dir.Z())
         print("Side view dir:", view_set.side.view_dir.X(),
               view_set.side.view_dir.Y(), view_set.side.view_dir.Z())
+    
+    print("Preparing drafting (three views):")
+    plot_base_drafting(shape)
 
 if __name__ == "__main__":
     main()

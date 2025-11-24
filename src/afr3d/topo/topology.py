@@ -18,7 +18,10 @@ from OCC.Core.TopTools import (
     TopTools_IndexedMapOfShape,
     TopTools_ListIteratorOfListOfShape,
 )
-from OCC.Core.TopoDS import topods_Edge, topods_Face, TopoDS_Shape
+from OCC.Core.TopoDS import topods, TopoDS_Shape
+
+def to_face(shape):
+    return topods.Face(shape)
 
 from afr3d.geom.primitives import (
     ConicalFaceInfo,
@@ -47,9 +50,9 @@ def collect_faces_and_map(shape: TopoDS_Shape):
     topexp.MapShapes(shape, TopAbs_FACE, face_map)
 
     n_faces = indexed_map_size(face_map)
-    faces: List[topods_Face] = []
+    faces: List[topods.Face] = []
     for i in range(1, n_faces + 1):
-        faces.append(topods_Face(face_map.FindKey(i)))
+        faces.append(to_face(face_map.FindKey(i)))
     return faces, face_map
 
 
@@ -66,7 +69,7 @@ def build_face_adjacency(shape: TopoDS_Shape, face_map):
         face_indices: List[int] = []
         it = TopTools_ListIteratorOfListOfShape(faces_list)
         while it.More():
-            f = topods_Face(it.Value())
+            f = to_face(it.Value())
             idx_1b = face_map.FindIndex(f)
             if idx_1b > 0:
                 face_indices.append(idx_1b - 1)
@@ -89,7 +92,7 @@ def extract_planar_faces(shape: TopoDS_Shape) -> List[PlanarFaceInfo]:
     exp = TopExp_Explorer(shape, TopAbs_FACE)
     face_index = 0
     while exp.More():
-        face = topods_Face(exp.Current())
+        face = to_face(exp.Current())
         adaptor = BRepAdaptor_Surface(face, True)
         surf_type = adaptor.GetType()
 
@@ -136,7 +139,7 @@ def extract_cylindrical_faces(
     exp = TopExp_Explorer(shape, TopAbs_FACE)
     face_index = 0
     while exp.More():
-        face = topods_Face(exp.Current())
+        face = to_face(exp.Current())
         adaptor = BRepAdaptor_Surface(face, True)
         surf_type = adaptor.GetType()
 
@@ -207,7 +210,7 @@ def extract_conical_faces(shape: TopoDS_Shape) -> List[ConicalFaceInfo]:
     exp = TopExp_Explorer(shape, TopAbs_FACE)
     face_index = 0
     while exp.More():
-        face = topods_Face(exp.Current())
+        face = to_face(exp.Current())
         adaptor = BRepAdaptor_Surface(face, True)
 
         if adaptor.GetType() == GeomAbs_Cone:
