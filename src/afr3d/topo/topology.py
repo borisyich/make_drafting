@@ -7,8 +7,8 @@ from typing import Dict, List, Tuple
 
 from OCC.Core.Bnd import Bnd_OBB
 from OCC.Core.BRepAdaptor import BRepAdaptor_Surface
-from OCC.Core.BRepBndLib import brepbndlib_AddOBB
-from OCC.Core.BRepGProp import brepgprop_SurfaceProperties
+from OCC.Core.BRepBndLib import brepbndlib
+from OCC.Core.BRepGProp import brepgprop
 from OCC.Core.GeomAbs import GeomAbs_Plane, GeomAbs_Cylinder, GeomAbs_Cone
 from OCC.Core.GProp import GProp_GProps
 from OCC.Core.TopAbs import TopAbs_EDGE, TopAbs_FACE, TopAbs_FORWARD, TopAbs_REVERSED
@@ -102,7 +102,7 @@ def extract_planar_faces(shape: TopoDS_Shape) -> List[PlanarFaceInfo]:
             loc = plane.Location()
 
             gprops = GProp_GProps()
-            brepgprop_SurfaceProperties(face, gprops)
+            brepgprop.SurfaceProperties(face, gprops)
             area = gprops.Mass()
 
             ori = face.Orientation()
@@ -167,7 +167,7 @@ def extract_cylindrical_faces(
                 orientation = str(ori)
 
             gprops = GProp_GProps()
-            brepgprop_SurfaceProperties(face, gprops)
+            brepgprop.SurfaceProperties(face, gprops)
             area = gprops.Mass()
 
             u_mid = 0.5 * (u_first + u_last)
@@ -254,7 +254,7 @@ def extract_conical_faces(shape: TopoDS_Shape) -> List[ConicalFaceInfo]:
 
 def get_part_max_dim(shape: TopoDS_Shape) -> float:
     obb = Bnd_OBB()
-    brepbndlib_AddOBB(shape, obb, True, True, True)
+    brepbndlib.AddOBB(shape, obb, True, True, True)
     m = 2.0 * max(obb.XHSize(), obb.YHSize(), obb.ZHSize())
     return m if m > 1e-6 else 100.0
 

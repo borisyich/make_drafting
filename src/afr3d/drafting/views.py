@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import List, Tuple
 
 from OCC.Core.Bnd import Bnd_OBB
-from OCC.Core.BRepBndLib import brepbndlib_AddOBB
+from OCC.Core.BRepBndLib import brepbndlib
 from OCC.Core.gp import gp_Dir, gp_Pnt, gp_Ax2, gp_Vec
 from OCC.Core.HLRAlgo import HLRAlgo_Projector
 from OCC.Core.HLRBRep import HLRBRep_Algo, HLRBRep_HLRToShape
@@ -27,11 +27,11 @@ from OCC.Core.TopoDS import topods
 def to_edge(shape):
     return topods.Edge(shape)
 
-try:
-    from OCC.Core.TopoDS import topods_Solid
-except ImportError:
-    from OCC.Core import _TopoDS as _t
-    def topods_Solid(s): return _t.topods_Solid(s)
+# try:
+#     from OCC.Core.TopoDS import topods_Solid
+# except ImportError:
+#     from OCC.Core import _TopoDS as _t
+#     def topods_Solid(s): return _t.topods_Solid(s)
 
 from OCC.Core.GeomAbs import (
     GeomAbs_Line,
@@ -87,7 +87,6 @@ class ProjectedSegment2D:
     visible: bool
 
 # --- Low-level utilities ---
-
 
 def _safe_edge_length(edge) -> float:
     """
@@ -180,7 +179,7 @@ def _compute_obb(shape):
         sizes: (sx, sy, sz) — полные размеры
     """
     obb = Bnd_OBB()
-    brepbndlib_AddOBB(shape, obb, True, True, True)
+    brepbndlib.AddOBB(shape, obb, True, True, True)
 
     c = obb.Center()  # в некоторых версиях это не чистый gp_Pnt
     center = gp_Pnt(c.X(), c.Y(), c.Z())
@@ -389,6 +388,37 @@ def select_main_views(shape) -> ViewSet:
     )
 
 
+def generate_six_obb_views(shape) -> List[OrthoViewDef]:
+    center, (d1, d2, d3), _ = _compute_obb(shape)
+    origin = gp_Pnt(center.X(), center.Y(), center.Z())
+
+    views: List[OrthoViewDef] = []
+
+    def make_ax2(name: str, dir_main: gp_Dir, dir_x_hint: gp_Dir) -> OrthoViewDef:
+        # строим ось: Z = dir_main, X = ортогональ к Z в плоскости (dir_x_hint, Z)
+        z = gp_Dir(dir_main.X(), dir_main.Y(), dir_main.Z())
+        # берём вектор, не коллинеарный z, и орто-нормируем
+        tmp = gp_Dir(dir_x_hint.X(), dir_x_hint.Y(), dir_x_hint.Z())
+        vx = gp_Vec(tmp.X(), tmp.Y(), tmp.Z())
+        vz = gp_Vec(z.X(), z.Y(), z.Z())
+        vx.Cross(vz)
+        if vx.Magnitude() < 1e-9:
+            vx = gp_Vec(1.0, 0.0, 0.0)
+        vx.Normalize()
+        xdir = gp_Dir(vx.X(), vx.Y(), vx.Z())
+        ax2 = gp_Ax2(origin, z, xdir)
+        return OrthoViewDef(name=name, ax2=ax2)
+
+    # d1, d2, d3 — ортонормальны
+    views.append(make_ax2("+d1", d1, d2))
+    views.append(make_ax2("-d1", gp_Dir(-d1.X(), -d1.Y(), -d1.Z()), d2))
+    views.append(make_ax2("+d2", d2, d3))
+    views.append(make_ax2("-d2", gp_Dir(-d2.X(), -d2.Y(), -d2.Z()), d3))
+    views.append(make_ax2("+d3", d3, d1))
+    views.append(make_ax2("-d3", gp_Dir(-d3.X(), -d3.Y(), -d3.Z()), d1))
+
+    return views
+
 # def _project_point_to_uv(p: gp_Pnt, origin: gp_Pnt, u: gp_Dir, v: gp_Dir) -> tuple[float, float]:
 #     """
 #     Проекция 3D-точки p в 2D-координаты (ξ, η) в базисе (u, v) с центром origin.
@@ -421,7 +451,7 @@ def extract_solids(root_shape):
 
     has_solids = False
     while exp.More():
-        solid = topods_Solid(exp.Current())
+        solid = topods.Solid(exp.Current())
         builder.Add(comp, solid)
         has_solids = True
         exp.Next()
