@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import matplotlib.pyplot as plt
+import math
 
 from dataclasses import dataclass
 from typing import List, Tuple
@@ -18,7 +19,6 @@ from OCC.Core.TopAbs import TopAbs_EDGE, TopAbs_SOLID
 from OCC.Core.BRepAdaptor import BRepAdaptor_Curve
 from OCC.Core.GCPnts import GCPnts_AbscissaPoint
 from OCC.Core.TopoDS import TopoDS_Compound
-import math
 
 from OCC.Core.BRep import BRep_Builder
 
@@ -27,12 +27,6 @@ from OCC.Core.TopoDS import topods
 def to_edge(shape):
     return topods.Edge(shape)
 
-# try:
-#     from OCC.Core.TopoDS import topods_Solid
-# except ImportError:
-#     from OCC.Core import _TopoDS as _t
-#     def topods_Solid(s): return _t.topods_Solid(s)
-
 from OCC.Core.GeomAbs import (
     GeomAbs_Line,
     GeomAbs_Circle,
@@ -40,51 +34,8 @@ from OCC.Core.GeomAbs import (
     GeomAbs_BSplineCurve,
     GeomAbs_BezierCurve,
 )
-# --- Utility dataclasses ---
 
-@dataclass
-class ViewHLRStats:
-    axis_index: int            # 0 -> d1, 1 -> d2, 2 -> d3
-    sign: int                  # +1 или -1
-    direction: gp_Dir          # нормаль взгляда в мировых координатах
-    A_obb: float               # "объёмная" площадь проекции
-    L_vis: float               # суммарная длина видимых линий
-    L_hid: float               # суммарная длина скрытых линий
-
-    @property
-    def R_hidden(self) -> float:
-        eps = 1e-9
-        denom = self.L_vis + self.L_hid + eps
-        return self.L_hid / denom
-
-
-@dataclass
-class OrthoViewDef:
-    name: str                  # 'front'/'top'/'side'
-    # view_dir: gp_Dir           # направление взгляда (в мировых коорд.)
-    # u: gp_Dir                  # ось "вправо" в плоскости вида
-    # v: gp_Dir                  # ось "вверх" в плоскости вида
-    ax2: gp_Ax2       # базис проекции (используется в HLR)
-
-
-@dataclass
-class ViewSet:
-    front: OrthoViewDef
-    top: OrthoViewDef
-    side: OrthoViewDef
-    # базис объекта (для шага 3 — построение 2D координат)
-    # x_obj: gp_Dir
-    # y_obj: gp_Dir
-    # z_obj: gp_Dir
-
-
-@dataclass
-class ProjectedSegment2D:
-    x1: float
-    y1: float
-    x2: float
-    y2: float
-    visible: bool
+from afr3d.drafting.model import ViewHLRStats, OrthoViewDef, ViewSet, ProjectedSegment2D
 
 # --- Low-level utilities ---
 

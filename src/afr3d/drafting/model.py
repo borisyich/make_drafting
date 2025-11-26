@@ -5,8 +5,17 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import List, Tuple, Optional
 
-from OCC.Core.gp import gp_Ax2
+from OCC.Core.gp import gp_Ax2, gp_Dir
 
+
+VIEW_ROTATION = {
+    "+d1": 0,      # фронт
+    "-d1": 180,    # задний
+    "+d2": 90,     # сверху
+    "-d2": -90,    # снизу
+    "+d3": 90,     # боковой
+    "-d3": -90,
+}
 
 Point2D = Tuple[float, float]
 
@@ -85,3 +94,40 @@ class DraftView2D:
 
     # более высокоуровневые кривые после аналитики:
     curves: List[DraftCurve2D] = field(default_factory=list)
+
+@dataclass
+class ViewHLRStats:
+    axis_index: int            # 0 -> d1, 1 -> d2, 2 -> d3
+    sign: int                  # +1 или -1
+    direction: gp_Dir          # нормаль взгляда в мировых координатах
+    A_obb: float               # "объёмная" площадь проекции
+    L_vis: float               # суммарная длина видимых линий
+    L_hid: float               # суммарная длина скрытых линий
+
+    @property
+    def R_hidden(self) -> float:
+        eps = 1e-9
+        denom = self.L_vis + self.L_hid + eps
+        return self.L_hid / denom
+
+
+@dataclass
+class OrthoViewDef:
+    name: str                  # 'front'/'top'/'side'
+    ax2: gp_Ax2       # базис проекции (используется в HLR)
+
+
+@dataclass
+class ViewSet:
+    front: OrthoViewDef
+    top: OrthoViewDef
+    side: OrthoViewDef
+
+
+@dataclass
+class ProjectedSegment2D:
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    visible: bool

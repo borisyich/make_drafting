@@ -331,3 +331,99 @@ def add_arc_curves_from_topology(
         exp_e.Next()
 
     return new_view
+
+def add_arc_polylines_from_topology(
+    view: DraftView2D,
+    shape,
+    angle_tol_deg: float = 5.0,
+    min_span_deg: float = 5.0,
+    max_span_deg: float = 355.0,
+    samples_per_arc: int = 12,
+) -> DraftView2D:
+    """
+    ДЕБАГ-ФУНКЦИЯ.
+
+    Ищет части окружностей (дуги) в рёбрах shape и добавляет их
+    как DraftCurve2D(kind=POLYLINE, layer='arcs_partial') в координаты вида.
+
+    - Берём только GeomAbs_Circle.
+    - Плоскость круга почти перпендикулярна направлению взгляда.
+    - Параметрический span кривой в градусах: между min_span_deg и max_span_deg.
+      => почти нулевые куски и почти полный круг (≈360°) отбрасываем.
+
+    Дуги рисуются полилиниями, чтобы избежать ошибок с theta1/theta2.
+    """
+    new_view = DraftView2D(
+        name=view.name,
+        ax2=view.ax2,
+        vertices=list(view.vertices),
+        edges=[DraftEdge2D(**e.__dict__) for e in view.edges],
+        curves=list(view.curves),
+    )
+
+    view_dir: gp_Dir = view.ax2.Direction()
+    cos_tol = math.cos(math.radians(angle_tol_deg))
+
+    exp_e = TopExp_Explorer(shape, TopAbs_EDGE)
+    while exp_e.More():
+        edge = topods.Edge(exp_e.Current())
+        try:
+            curve = BRepAdaptor_Curve(edge)
+            if curve.GetType() != GeomAbs_Circle:
+                exp_e.Next()
+                continue
+
+            circ = curve.Circle()
+            axis = circ.Axis()
+            normal = axis.Direction()
+
+            dot = (
+                normal.X() * view_dir.X()
+                + normal.Y() * view_dir.Y()
+                + normal.Z() * view_dir.Z()
+            )
+            # плоскость круга почти фронтальна
+            if abs(dot) < cos_tol:
+                exp_e.Next()
+                continue
+
+            first = curve.FirstParameter()
+            last = curve.LastParameter()
+            if not (math.isfinite(first) and math.isfinite(last)):
+                exp_e.Next()
+                continue
+
+            span = abs(last - first)
+            span_deg = math.degrees(span)
+
+            # отбрасываем почти нулевые и почти полные окружности
+            if span_deg < min_span_deg or span_deg > max_span_deg:
+                exp_e.Next()
+                continue  # это либо слишком мелкий кусок, либо почти полный круг
+
+            # дискретизация дуги по параметру
+            n = max(3, samples_per_arc)
+            dt = (last - first) / n
+            pts2d: List[Tuple[float, float]] = []
+            for i in range(n + 1):
+                u = first + i * dt
+                p3d = curve.Value(u)
+                x2, y2 = project_point_to_view(p3d, view.ax2)
+                pts2d.append((float(x2), float(y2)))
+
+            # создаём полилинию
+            arc_poly = DraftCurve2D(
+                kind=DraftCurveKind.POLYLINE,
+                visible=True,
+                points=pts2d,
+                layer="arcs_partial",
+            )
+            new_view.curves.append(arc_poly)
+
+        except Exception:
+            # дебаг: не роняем всё из-за одного ребра
+            pass
+
+        exp_e.Next()
+
+    return new_view
