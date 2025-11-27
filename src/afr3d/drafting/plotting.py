@@ -19,27 +19,22 @@ def rotate_point_deg(x: float, y: float, angle_deg: float) -> tuple[float, float
     s = math.sin(rad)
     return c * x - s * y, s * x + c * y
 
-
 def plot_analytic_view_with_vertices(
     ax,
     view: DraftView2D,
     title: Optional[str] = None,
     line_width: float = 0.5,
+    show_hidden: bool = False,
 ):
-    """
-    Аналитический вид:
-      - рёбра/окружности тонкими линиями;
-      - вершины — звёздочками.
-    Поворот вида задаётся таблицей VIEW_ROTATION по имени вида.
-    """
     angle = VIEW_ROTATION.get(view.name, 0)
-
     vertices_by_id: Dict[int, DraftVertex2D] = {v.id: v for v in view.vertices}
 
-    # --- рёбра ---
     for e in view.edges:
-        if not getattr(e, "visible", True):
-            continue
+        print(getattr(e, "visible"))
+        is_visible = getattr(e, "visible", True)
+
+        if not is_visible and not show_hidden:
+            continue  # скрытые просто не рисуем
 
         v_start = vertices_by_id.get(getattr(e, "v_start", None))
         v_end = vertices_by_id.get(getattr(e, "v_end", None))
@@ -49,46 +44,22 @@ def plot_analytic_view_with_vertices(
         x1, y1 = rotate_point_deg(v_start.x, v_start.y, angle)
         x2, y2 = rotate_point_deg(v_end.x, v_end.y, angle)
 
+        linestyle = "-" if is_visible else "--"
+
         ax.plot(
             [x1, x2],
             [y1, y2],
             linewidth=line_width,
             color="black",
+            linestyle=linestyle,
         )
 
-    # --- окружности ---
-    for c in view.curves:
-        if getattr(c, "kind", None) is not DraftCurveKind.CIRCLE:
-            continue
-        if not getattr(c, "visible", True):
-            continue
-
-        cx, cy = c.center
-        r = c.radius
-        cxr, cyr = rotate_point_deg(cx, cy, angle)
-
-        circle = plt.Circle(
-            (cxr, cyr),
-            r,
-            fill=False,
-            linewidth=line_width,
-            color="black",
-        )
-        ax.add_patch(circle)
-
-    # --- вершины ---
+    # вершины — как было
     if view.vertices:
         v_rot = [rotate_point_deg(v.x, v.y, angle) for v in view.vertices]
         xs = [vx for vx, _ in v_rot]
         ys = [vy for _, vy in v_rot]
-
-        ax.scatter(
-            xs,
-            ys,
-            marker="*",
-            s=20,
-            color="black",
-        )
+        ax.scatter(xs, ys, marker="*", s=20, color="black")
 
     ax.set_aspect("equal", adjustable="box")
     ax.invert_yaxis()

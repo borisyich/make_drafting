@@ -43,7 +43,7 @@ class DraftEdge2D:
     v_start: int         # id вершины
     v_end: int           # id вершины
     kind: DraftCurveKind = DraftCurveKind.LINE
-    visible: bool = True
+    visible: bool = False
 
     # если это кусок окружности/дуги:
     center: Optional[Point2D] = None

@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import math
+
 from dataclasses import dataclass
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Iterable, Set
 
 from OCC.Core.gp import gp_Pnt
 from OCC.Core.TopAbs import TopAbs_VERTEX, TopAbs_EDGE
-#from OCC.Core import TopExp
 from OCC.Core.TopExp import TopExp_Explorer, topexp as TopExp
 from OCC.Core.TopoDS import topods
 from OCC.Core.TopTools import TopTools_IndexedMapOfShape
@@ -19,6 +20,8 @@ from afr3d.drafting.model import (
     DraftView2D,
     DraftVertex2D,
     DraftEdge2D,
+    ProjectedSegment2D,
+    DraftCurveKind
 )
 from afr3d.drafting.analytic import project_point_to_view
 
@@ -115,8 +118,6 @@ def add_vertices_and_line_edges_from_topology(
     layer: str = "edges_topology",
 ) -> DraftView2D:
     """
-    ДЕБАГ-ФУНКЦИЯ.
-
     1) Строит карту вершин shape → индекс.
     2) Добавляет в вид проекции всех вершин (DraftVertex2D с source_vertex_index).
     3) Для КАЖДОГО линейного ребра (GeomAbs_Line) находит его концевые вершины
@@ -201,19 +202,296 @@ def add_vertices_and_line_edges_from_topology(
                 id=next_eid,
                 v_start=vid1,
                 v_end=vid2,
-                visible=True,
+                visible=True, # ИСПРАВИТЬ!
                 layer=layer,
-                # если у DraftEdge2D есть такие поля — будут заполнены;
-                # если нет — просто убери их.
                 source_edge_index=next_eid,
             )
             new_view.edges.append(e2d)
             next_eid += 1
 
         except Exception:
-            # дебаг: одно странное ребро не должно ронять весь вид
             pass
 
         exp_e.Next()
 
     return new_view
+
+def build_topology_view_with_hlr_segments(
+    shape,
+    view_name: str,
+    ax2,
+    hlr_segments: Iterable[ProjectedSegment2D],
+    dedup_tol: float = 1e-5,
+    match_tol: float = 1e-2,         # ← немного увеличил допуск
+    layer_visible: str = "outline_topology",
+    layer_hidden: str = "hidden_topology",
+    check_unclassified: bool = True,
+    unclassified_tol: float = 1e-3,
+    debug_stats: bool = True,        # ← чтобы легко включать/выключать сводку
+) -> DraftView2D:
+    """
+    Строит DraftView2D, где КАЖДОЕ линейное 3D-ребро порезано на участки
+    по HLR-сегментам (ProjectedSegment2D), и каждый участок помечен
+    visible=True/False.
+
+    Важные моменты:
+      - shape       — исходный TopoDS_Shape.
+      - view_name   — "+d1"/"-d2"/... (используется для поворота при отрисовке).
+      - ax2         — Тот же базис, что использовался в build_linear_view(shape, ax2).
+      - hlr_segments — результат build_linear_view(...).
+
+    debug_stats=True:
+      - печатает общее количество рёбер до / после разбиения, длины видимых/скрытых и т.п.
+    """
+    view = DraftView2D(name=view_name, ax2=ax2)
+
+    # --- 0. 3D-вершины и их 2D-проекции ---
+    vmap, points3d, _ = _build_vertex_index_map(shape, dedup_tol)
+
+    proj2d: List[Tuple[float, float]] = []
+    for p3d in points3d:
+        x2, y2 = project_point_to_view(p3d, ax2)
+        proj2d.append((float(x2), float(y2)))
+
+    # карта src_vertex_index -> id вершины во view
+    srcidx_to_vid: Dict[int, int] = {}
+    next_vid = 0
+
+    def _ensure_vertex(src_idx: int) -> int:
+        nonlocal next_vid
+        if src_idx in srcidx_to_vid:
+            return srcidx_to_vid[src_idx]
+        x2, y2 = proj2d[src_idx]
+        v2d = DraftVertex2D(
+            id=next_vid,
+            x=x2,
+            y=y2,
+            source_vertex_index=src_idx,
+        )
+        view.vertices.append(v2d)
+        srcidx_to_vid[src_idx] = next_vid
+        next_vid += 1
+        return v2d.id
+
+    # дополнительные вершины (точки разбиения ребра, source_vertex_index=None)
+    extra_points: Dict[Tuple[int, float], int] = {}  # (edge_idx, t) -> vid
+
+    def _add_intermediate_vertex(edge_idx: int, x: float, y: float, t: float) -> int:
+        nonlocal next_vid
+        key = (edge_idx, round(t / dedup_tol) * dedup_tol)
+        if key in extra_points:
+            return extra_points[key]
+        v2d = DraftVertex2D(
+            id=next_vid,
+            x=x,
+            y=y,
+            source_vertex_index=None,
+        )
+        view.vertices.append(v2d)
+        extra_points[key] = next_vid
+        next_vid += 1
+        return v2d.id
+
+    # --- 1. Подготовка HLR-сегментов ---
+    hlr_list = list(hlr_segments)
+    mt2 = match_tol * match_tol
+
+    # --- 2. Статистика по результатам ---
+    edges_total = 0
+    edges_with_coverage = 0
+    edges_no_coverage = 0
+    subedges_total = 0
+    subedges_visible = 0
+    subedges_hidden = 0
+    total_visible_len = 0.0
+    total_hidden_len = 0.0
+
+    next_eid = 0
+
+    exp_e = TopExp_Explorer(shape, TopAbs_EDGE)
+    edge_idx = 0
+
+    while exp_e.More():
+        edge = topods.Edge(exp_e.Current())
+        exp_e.Next()
+        edges_total += 1
+
+        try:
+            curve = BRepAdaptor_Curve(edge)
+            if curve.GetType() != GeomAbs_Line:
+                edge_idx += 1
+                continue  # только прямые рёбра
+
+            v1 = topods.Vertex(TopExp.FirstVertex(edge))
+            v2 = topods.Vertex(TopExp.LastVertex(edge))
+
+            idx1 = vmap.FindIndex(v1) - 1  # 0-based
+            idx2 = vmap.FindIndex(v2) - 1
+            if idx1 < 0 or idx2 < 0:
+                edge_idx += 1
+                continue
+
+            x1, y1 = proj2d[idx1]
+            x2, y2 = proj2d[idx2]
+
+            dx = x2 - x1
+            dy = y2 - y1
+            L = math.hypot(dx, dy)
+            if L < 1e-9:
+                edge_idx += 1
+                continue
+
+            L2 = L * L
+
+            # --- 2a. Собираем интервалы покрытия [t0, t1] из HLR ---
+            intervals: List[Tuple[float, float, bool]] = []
+
+            # небольшая оптимизация: заранее локальные функции
+            def _dist2_to_line(qx: float, qy: float) -> float:
+                vx = qx - x1
+                vy = qy - y1
+                cross = vx * dy - vy * dx
+                # d^2 = cross^2 / |d|^2
+                return (cross * cross) / L2
+
+            def _param_t(qx: float, qy: float) -> float:
+                vx = qx - x1
+                vy = qy - y1
+                return (vx * dx + vy * dy) / L2
+
+            for seg in hlr_list:
+                q1x, q1y = seg.x1, seg.y1
+                q2x, q2y = seg.x2, seg.y2
+
+                # 1) оба конца недалеко от прямой ребра
+                if _dist2_to_line(q1x, q1y) > mt2 and _dist2_to_line(q2x, q2y) > mt2:
+                    continue
+
+                # 2) параметры по направлению ребра
+                t1 = _param_t(q1x, q1y)
+                t2 = _param_t(q2x, q2y)
+
+                # если сегмент полностью вне диапазона [0,1] — пропускаем
+                if max(t1, t2) < -0.05 or min(t1, t2) > 1.05:
+                    continue
+
+                t0 = max(0.0, min(t1, t2))
+                t1_ = min(1.0, max(t1, t2))
+                if t1_ - t0 < 1e-5:
+                    continue
+
+                intervals.append((t0, t1_, seg.visible))
+
+            if not intervals:
+                edges_no_coverage += 1
+                if debug_stats and edges_no_coverage <= 10:
+                    print(f"[WARN] Edge #{edge_idx}: no HLR coverage")
+                edge_idx += 1
+                continue
+
+            edges_with_coverage += 1
+
+            # --- 2b. Режем [0,1] по всем t-границам ---
+            cuts = {0.0, 1.0}
+            for t0, t1_, vis in intervals:
+                cuts.add(t0)
+                cuts.add(t1_)
+            cuts_list = sorted(cuts)
+
+            uncovered_len = 0.0
+
+            for i in range(len(cuts_list) - 1):
+                a = cuts_list[i]
+                b = cuts_list[i + 1]
+                if b - a < 1e-5:
+                    continue
+
+                mid = 0.5 * (a + b)
+
+                in_any = False
+                visible_here = False
+                for t0, t1_, vis in intervals:
+                    if t0 - 1e-9 <= mid <= t1_ + 1e-9:
+                        in_any = True
+                        if vis:
+                            visible_here = True
+
+                seg_len = (b - a) * L
+                if not in_any:
+                    uncovered_len += seg_len
+                    continue  # этот кусок мы не рисуем
+
+                # 2D-координаты концов подотрезка
+                xa = x1 + dx * a
+                ya = y1 + dy * a
+                xb = x1 + dx * b
+                yb = y1 + dy * b
+
+                # вершины (концы)
+                if abs(a) < 1e-8:
+                    vid_a = _ensure_vertex(idx1)
+                elif abs(a - 1.0) < 1e-8:
+                    vid_a = _ensure_vertex(idx2)
+                else:
+                    vid_a = _add_intermediate_vertex(edge_idx, xa, ya, a)
+
+                if abs(b) < 1e-8:
+                    vid_b = _ensure_vertex(idx1)
+                elif abs(b - 1.0) < 1e-8:
+                    vid_b = _ensure_vertex(idx2)
+                else:
+                    vid_b = _add_intermediate_vertex(edge_idx, xb, yb, b)
+
+                layer = layer_visible if visible_here else layer_hidden
+
+                e2d = DraftEdge2D(
+                    id=next_eid,
+                    v_start=vid_a,
+                    v_end=vid_b,
+                    kind=DraftCurveKind.LINE,
+                    visible=visible_here,
+                    layer=layer,
+                    source_edge_index=edge_idx,
+                )
+                view.edges.append(e2d)
+                next_eid += 1
+                subedges_total += 1
+                if visible_here:
+                    subedges_visible += 1
+                    total_visible_len += seg_len
+                else:
+                    subedges_hidden += 1
+                    total_hidden_len += seg_len
+
+            if check_unclassified and uncovered_len > unclassified_tol:
+                if debug_stats:
+                    print(
+                        f"[WARN] Edge #{edge_idx}: uncovered length "
+                        f"{uncovered_len:.6f} (tol={unclassified_tol})"
+                    )
+
+        except Exception as ex:
+            if debug_stats:
+                print(f"[ERROR] edge #{edge_idx}: {ex}")
+
+        edge_idx += 1
+
+    # --- Итоговая сводка ---
+    if debug_stats:
+        print(
+            "[HLR] edges_total={:d}, with_coverage={:d}, no_coverage={:d}".format(
+                edges_total, edges_with_coverage, edges_no_coverage
+            )
+        )
+        print(
+            "[HLR] subedges_total={:d} (vis={:d}, hid={:d})".format(
+                subedges_total, subedges_visible, subedges_hidden
+            )
+        )
+        print(
+            "[HLR] lengths: L_vis={:.6f}, L_hid={:.6f}".format(
+                total_visible_len, total_hidden_len
+            )
+        )
+
+    return view
