@@ -30,7 +30,6 @@ def plot_analytic_view_with_vertices(
     vertices_by_id: Dict[int, DraftVertex2D] = {v.id: v for v in view.vertices}
 
     for e in view.edges:
-        print(getattr(e, "visible"))
         is_visible = getattr(e, "visible", True)
 
         if not is_visible and not show_hidden:

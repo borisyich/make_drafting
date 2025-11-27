@@ -511,7 +511,7 @@ def build_linear_view(shape, view_ax2) -> List[ProjectedSegment2D]:
     """
     Сырой вид:
     - HLR в Ax2 вида;
-    - используем VCompound + OutLineVCompound;
+    - используем V* и H* компаунды;
     - кривые дискретизируем с ограниченным числом сегментов.
     """
     segments: List[ProjectedSegment2D] = []
@@ -531,8 +531,18 @@ def build_linear_view(shape, view_ax2) -> List[ProjectedSegment2D]:
     visible_comps = [
         hlr.OutLineVCompound(),
         hlr.VCompound(),
+        hlr.Rg1LineVCompound(),
+        hlr.RgNLineVCompound(),
     ]
 
+    hidden_comps = [
+        hlr.OutLineHCompound(),
+        hlr.HCompound(),
+        hlr.Rg1LineHCompound(),
+        hlr.RgNLineHCompound(),
+    ]
+
+    # --- видимые сегменты ---
     for comp in visible_comps:
         if comp is None or comp.IsNull():
             continue
@@ -546,6 +556,26 @@ def build_linear_view(shape, view_ax2) -> List[ProjectedSegment2D]:
                             x1=x1, y1=y1,
                             x2=x2, y2=y2,
                             visible=True,
+                        )
+                    )
+            except Exception:
+                pass
+            exp.Next()
+
+    # --- скрытые сегменты ---
+    for comp in hidden_comps:
+        if comp is None or comp.IsNull():
+            continue
+        exp = TopExp_Explorer(comp, TopAbs_EDGE)
+        while exp.More():
+            edge = topods.Edge(exp.Current())
+            try:
+                for x1, y1, x2, y2 in _edge_to_poly_segments_2d(edge):
+                    segments.append(
+                        ProjectedSegment2D(
+                            x1=x1, y1=y1,
+                            x2=x2, y2=y2,
+                            visible=False,   # ← ключевое отличие
                         )
                     )
             except Exception:
