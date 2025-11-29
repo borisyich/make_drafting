@@ -21,42 +21,7 @@ from afr3d.geom.primitives import (
     vec_norm,
 )
 from afr3d.topo.topology import get_part_max_dim
-
-
-HoleKind = Literal["through", "blind", "unknown"]
-HoleGeometryType = Literal["circular_simple", "circular_stepped", "non_circular", "unknown"]
-
-
-@dataclass
-class HoleSegment:
-    kind: Literal["cyl", "cone"]
-    radius: float | None
-    length: float
-    face_indices: List[int]
-
-
-@dataclass
-class ChamferInfo:
-    face_index: int
-    length: float
-    semi_angle_deg: float
-    side: str
-
-
-@dataclass
-class HoleAFR:
-    id: int
-    geometry_type: HoleGeometryType
-    kind: HoleKind
-    axis_origin: Tuple[float, float, float] | None
-    axis_dir: Tuple[float, float, float] | None
-    nominal_radius: float | None
-    segments: List[HoleSegment]
-    side_face_indices: List[int]
-    opening_faces: List[int]
-    bottom_faces: List[int]
-    chamfers: List[ChamferInfo]
-
+from afr3d.drafting.model import HoleAFR, HoleSegment, ChamferInfo, HoleGeometryType, HoleKind
 
 def cluster_hole_features_by_axis(
     hole_features: List[CylindricalFeature],

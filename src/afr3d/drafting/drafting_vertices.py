@@ -21,7 +21,8 @@ from afr3d.drafting.model import (
     DraftVertex2D,
     DraftEdge2D,
     ProjectedSegment2D,
-    DraftCurveKind
+    DraftCurveKind,
+    CoverageKind
 )
 from afr3d.drafting.analytic import project_point_to_view
 
@@ -222,12 +223,13 @@ def build_topology_view_with_hlr_segments(
     ax2,
     hlr_segments: Iterable[ProjectedSegment2D],
     dedup_tol: float = 1e-5,
-    match_tol: float = 1e-2,         # ← немного увеличил допуск
+    match_tol: float = 1e-2,
     layer_visible: str = "outline_topology",
     layer_hidden: str = "hidden_topology",
     check_unclassified: bool = True,
     unclassified_tol: float = 1e-3,
     debug_stats: bool = True,        # ← чтобы легко включать/выключать сводку
+    feature_edge_map: Optional[Dict[int, str]] = None,
 ) -> DraftView2D:
     """
     Строит DraftView2D, где КАЖДОЕ линейное 3D-ребро порезано на участки
@@ -444,6 +446,25 @@ def build_topology_view_with_hlr_segments(
 
                 layer = layer_visible if visible_here else layer_hidden
 
+                covered_len = max(L - uncovered_len, 0.0)
+
+                if not intervals:
+                    # как у тебя сейчас: no HLR coverage
+                    coverage_kind = CoverageKind.NONE
+                    coverage_gap = L
+                else:
+                    # есть хоть какое-то покрытие
+                    if uncovered_len < unclassified_tol:
+                        coverage_kind = CoverageKind.FULL
+                    elif covered_len < unclassified_tol:
+                        coverage_kind = CoverageKind.NONE
+                    else:
+                        coverage_kind = CoverageKind.PARTIAL
+                    coverage_gap = uncovered_len
+                feat_id = None
+                if feature_edge_map is not None:
+                    feat_id = feature_edge_map.get(edge_idx)
+
                 e2d = DraftEdge2D(
                     id=next_eid,
                     v_start=vid_a,
@@ -452,7 +473,11 @@ def build_topology_view_with_hlr_segments(
                     visible=visible_here,
                     layer=layer,
                     source_edge_index=edge_idx,
+                    feature_id=feat_id,
+                    coverage=coverage_kind,
+                    coverage_gap=coverage_gap,
                 )
+
                 view.edges.append(e2d)
                 next_eid += 1
                 subedges_total += 1

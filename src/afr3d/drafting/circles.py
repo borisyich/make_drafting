@@ -1,7 +1,8 @@
 # afr3d/drafting/circles.py
 
 import math
-from typing import Dict, List, Optional, Tuple
+from math import atan2, pi
+from typing import Dict, List, Optional, Tuple, Iterable
 
 from OCC.Core.gp import gp_Dir, gp_Pnt
 from OCC.Core.TopExp import TopExp_Explorer
@@ -15,6 +16,8 @@ from afr3d.drafting.model import (
     DraftCurve2D,
     DraftCurveKind,
     DraftEdge2D,
+    ProjectedSegment2D,
+    CoverageKind
 )
 from afr3d.drafting.analytic import project_point_to_view
 from afr3d.features import HoleAFR
@@ -75,13 +78,22 @@ def rebuild_circles_from_hlr_analytic(
             continue  # не фронтальное отверстие
 
         cx, cy = project_point_to_view(axis_pnt, view.ax2)
+        
+        hole_fid = h.feature_id
+        if hole_fid is None:
+            if getattr(h, "id", None) is not None:
+                hole_fid = f"hole:{h.id}"
+            elif getattr(h, "name", None):
+                hole_fid = f"hole:{h.name}"
+            else:
+                hole_fid = "hole:unknown"
 
         circle = DraftCurve2D(
             kind=DraftCurveKind.CIRCLE,
             visible=True,
             center=(cx, cy),
             radius=float(h.nominal_radius),
-            feature_id=f"hole:{h.id}",
+            feature_id=hole_fid,
             layer="holes",
         )
         new_view.curves.append(circle)
@@ -425,5 +437,225 @@ def add_arc_polylines_from_topology(
             pass
 
         exp_e.Next()
+
+    return new_view
+
+
+def apply_hlr_visibility_to_circles(
+    view: DraftView2D,
+    hlr_segments: List[ProjectedSegment2D],
+    match_tol: float = 1e-2,          # допуск по радиусу
+    angle_eps: float = 1e-4,          # допуск по углу в радианах
+    full_circle_tol_deg: float = 3.0, # если покрытие ~360°, можно оставить CIRCLE
+    debug: bool = False,
+) -> DraftView2D:
+    """
+    Разбивает окружности из view.curves на видимые/невидимые дуги по маске HLR.
+
+    - Если по окружности вообще нет HLR-сегментов → полностью оставляем как есть.
+    - Если сегменты есть → строим покрытие по углу (0..2π) и выдаём набор ARC.
+    - Остальные кривые (не CIRCLE) копируем без изменений.
+
+    coverage / coverage_gap:
+      - для исходной окружности считаем full_len = 2πR и uncovered_len (где HLR нет);
+      - coverage = FULL / PARTIAL / NONE, coverage_gap = uncovered_len.
+      - у созданных дуг coverage=FULL, coverage_gap=0.0 (дуга сама полностью определена).
+    """
+    two_pi = 2.0 * math.pi
+    new_view = DraftView2D(
+        name=view.name,
+        ax2=view.ax2,
+        vertices=list(view.vertices),
+        edges=[DraftEdge2D(**e.__dict__) for e in view.edges],
+        curves=[],
+    )
+
+    segs = list(hlr_segments)
+
+    def _norm_angle(a: float) -> float:
+        while a < 0.0:
+            a += two_pi
+        while a >= two_pi:
+            a -= two_pi
+        return a
+
+    def _add_interval(intervals, a1, a2, visible: bool):
+        """Добавляем угловой интервал с учётом перехода через 2π."""
+        a1 = _norm_angle(a1)
+        a2 = _norm_angle(a2)
+        if abs(a1 - a2) < angle_eps:
+            return
+        if a2 < a1:
+            intervals.append((a1, two_pi, visible))
+            intervals.append((0.0, a2, visible))
+        else:
+            intervals.append((a1, a2, visible))
+
+    for c in view.curves:
+        if getattr(c, "kind", None) is not DraftCurveKind.CIRCLE:
+            # все не-окружности копируем как есть
+            new_view.curves.append(c)
+            continue
+
+        if c.center is None or c.radius is None:
+            new_view.curves.append(c)
+            continue
+
+        cx, cy = c.center
+        R = float(c.radius)
+
+        # --- 1. собираем интервалы по HLR-сегментам ---
+        intervals: List[Tuple[float, float, bool]] = []
+
+        for s in segs:
+            mx = 0.5 * (s.x1 + s.x2)
+            my = 0.5 * (s.y1 + s.y2)
+
+            dx = mx - cx
+            dy = my - cy
+            dist = math.hypot(dx, dy)
+
+            if abs(dist - R) > match_tol:
+                continue
+
+            a1 = math.atan2(s.y1 - cy, s.x1 - cx)
+            a2 = math.atan2(s.y2 - cy, s.x2 - cx)
+            _add_interval(intervals, a1, a2, s.visible)
+
+        if not intervals:
+            # HLR вообще не "зацепил" окружность — оставляем как есть
+            if debug:
+                print(
+                    f"[CIRC HLR] circle at ({cx:.3f},{cy:.3f}), R={R:.3f}: no coverage"
+                )
+            # покрытие NONE, вся длина — дырка
+            full_len = 2.0 * math.pi * R
+            new_circle = DraftCurve2D(
+                kind=DraftCurveKind.CIRCLE,
+                visible=c.visible,
+                center=(cx, cy),
+                radius=R,
+                edge_ids=list(c.edge_ids),
+                feature_id=c.feature_id,
+                layer=c.layer or "circles_hlr",
+                coverage=CoverageKind.NONE,
+                coverage_gap=full_len,
+            )
+            new_view.curves.append(new_circle)
+            continue
+
+        # --- 2. режем [0,2π] по границам интервалов ---
+        cuts = {0.0, two_pi}
+        for a0, a1, vis in intervals:
+            cuts.add(_norm_angle(a0))
+            cuts.add(_norm_angle(a1))
+
+        cuts_list = sorted(cuts)
+        merged_cuts = [cuts_list[0]]
+        for a in cuts_list[1:]:
+            if abs(a - merged_cuts[-1]) > angle_eps:
+                merged_cuts.append(a)
+        cuts_list = merged_cuts
+
+        arc_parts: List[Tuple[float, float, bool]] = []
+        uncovered_len = 0.0
+
+        for i in range(len(cuts_list) - 1):
+            a0 = cuts_list[i]
+            a1 = cuts_list[i + 1]
+            if a1 - a0 < angle_eps:
+                continue
+
+            mid = _norm_angle(0.5 * (a0 + a1))
+
+            in_any = False
+            visible_here = False
+            for t0, t1, vis in intervals:
+                if t0 - angle_eps <= mid <= t1 + angle_eps:
+                    in_any = True
+                    if vis:
+                        visible_here = True
+
+            seg_len = (a1 - a0) * R
+            if not in_any:
+                uncovered_len += seg_len
+                continue
+
+            arc_parts.append((a0, a1, visible_here))
+
+        full_len = 2.0 * math.pi * R
+        covered_len = max(full_len - uncovered_len, 0.0)
+
+        if uncovered_len < 1e-3:
+            coverage_kind = CoverageKind.FULL
+        elif covered_len < 1e-3:
+            coverage_kind = CoverageKind.NONE
+        else:
+            coverage_kind = CoverageKind.PARTIAL
+
+        coverage_gap = uncovered_len
+
+        if debug:
+            print(
+                f"[CIRC HLR] circle at ({cx:.3f},{cy:.3f}), R={R:.3f}: "
+                f"uncovered_len={uncovered_len:.6f}, "
+                f"coverage={coverage_kind.name}"
+            )
+
+        if not arc_parts:
+            # формально HLR что-то дал, но всё ушло в uncovered → как NONE
+            new_circle = DraftCurve2D(
+                kind=DraftCurveKind.CIRCLE,
+                visible=c.visible,
+                center=(cx, cy),
+                radius=R,
+                edge_ids=list(c.edge_ids),
+                feature_id=c.feature_id,
+                layer=c.layer or "circles_hlr",
+                coverage=coverage_kind,
+                coverage_gap=coverage_gap,
+            )
+            new_view.curves.append(new_circle)
+            continue
+
+        # --- 3. если покрытие почти полное и одной видимости → оставляем CIRCLE ---
+        total_angle = sum(b - a for a, b, _ in arc_parts)
+        all_visible = all(vis for _, _, vis in arc_parts)
+        all_hidden = all((not vis) for _, _, vis in arc_parts)
+
+        full_circle_tol = math.radians(full_circle_tol_deg)
+
+        if abs(total_angle - two_pi) < full_circle_tol and (all_visible or all_hidden):
+            vis = all_visible
+            new_circle = DraftCurve2D(
+                kind=DraftCurveKind.CIRCLE,
+                visible=vis,
+                center=(cx, cy),
+                radius=R,
+                edge_ids=list(c.edge_ids),
+                feature_id=c.feature_id,
+                layer=c.layer or "circles_hlr",
+                coverage=coverage_kind,
+                coverage_gap=coverage_gap,
+            )
+            new_view.curves.append(new_circle)
+            continue
+
+        # --- 4. иначе окружность разбиваем на дуги ARC ---
+        for a0, a1, vis in arc_parts:
+            arc = DraftCurve2D(
+                kind=DraftCurveKind.ARC,
+                visible=vis,
+                center=(cx, cy),
+                radius=R,
+                start_angle=a0,
+                end_angle=a1,
+                edge_ids=list(c.edge_ids),
+                feature_id=c.feature_id,
+                layer=c.layer or "circles_hlr",
+                coverage=CoverageKind.FULL,
+                coverage_gap=0.0,
+            )
+            new_view.curves.append(arc)
 
     return new_view

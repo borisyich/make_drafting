@@ -13,8 +13,8 @@ The main ideas:
 ---
 conda env create -f environment.yml
 
-conda activate oss_env
-python -m ipykernel install --user --name oss_env --display-name "oss_env"
+conda activate occ_env
+python -m ipykernel install --user --name occ_env --display-name "occ_env"
 
 
 Basic part analysis: 

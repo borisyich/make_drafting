@@ -3,7 +3,7 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Literal
 
 from OCC.Core.gp import gp_Ax2, gp_Dir
 
@@ -17,6 +17,9 @@ VIEW_ROTATION = {
     "-d3": -90,
 }
 
+HoleKind = Literal["through", "blind", "unknown"]
+HoleGeometryType = Literal["circular_simple", "circular_stepped", "non_circular", "unknown"]
+
 Point2D = Tuple[float, float]
 
 @dataclass
@@ -26,6 +29,13 @@ class DraftCurveKind(Enum):
     ARC = auto()
     POLYLINE = auto()
     # ELLIPSE и прочее можно добавить позже
+
+
+@dataclass
+class CoverageKind(Enum):
+    FULL = auto()     # полностью покрыто HLR (доверяем)
+    PARTIAL = auto()  # HLR покрыл только часть (есть "дырки")
+    NONE = auto()     # HLR вообще не дал покрытия
 
 @dataclass
 class DraftVertex2D:
@@ -52,7 +62,7 @@ class DraftEdge2D:
     end_angle: Optional[float] = None
 
     # связь с 3D / AFR
-    source_edge_index: Optional[int] = None
+    source_edge_index: Optional[int] = None  # индекс ребра в TopTools_IndexedMapOfShape или свой индекс
     source_curve_id: Optional[int] = None
     feature_id: Optional[str] = None     # например "hole:3"
     layer: str = ""                      # "outline", "hidden", "center", ...
@@ -60,6 +70,9 @@ class DraftEdge2D:
     # NEW: к каким граням 3D-тела относится это 2D-ребро
     face_indices: List[int] = field(default_factory=list)
 
+    # покрытие HLR
+    coverage: CoverageKind = CoverageKind.FULL
+    coverage_gap: float = 0.0  # длина "дыр" по этому ребру (в мм)
 
 # Кривые более высокого уровня (после “склейки” рёбер)
 # Отдельно от “сырых” рёбер удобно хранить уже объединённые сущности:
@@ -81,6 +94,10 @@ class DraftCurve2D:
     edge_ids: List[int] = field(default_factory=list)
     feature_id: Optional[str] = None
     layer: str = ""
+
+    # покрытие HLR (для окружностей/дуг)
+    coverage: CoverageKind = CoverageKind.FULL
+    coverage_gap: float = 0.0   # суммарная длина по дуге/кругу, не покрытая HLR
 
 # новый аналитический вид
 @dataclass
@@ -131,3 +148,34 @@ class ProjectedSegment2D:
     x2: float
     y2: float
     visible: bool
+
+@dataclass
+class HoleSegment:
+    kind: Literal["cyl", "cone"]
+    radius: float | None
+    length: float
+    face_indices: List[int]
+
+@dataclass
+class ChamferInfo:
+    face_index: int
+    length: float
+    semi_angle_deg: float
+    side: str
+
+@dataclass
+class HoleAFR:
+    id: int
+    geometry_type: HoleGeometryType
+    kind: HoleKind
+    axis_origin: Tuple[float, float, float] | None
+    axis_dir: Tuple[float, float, float] | None
+    nominal_radius: float | None
+    segments: List[HoleSegment]
+    side_face_indices: List[int]
+    opening_faces: List[int]
+    bottom_faces: List[int]
+    chamfers: List[ChamferInfo]
+
+    name: Optional[str] = None
+    feature_id: Optional[str] = None
