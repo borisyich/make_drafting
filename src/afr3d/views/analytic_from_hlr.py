@@ -1,23 +1,9 @@
-"""
-afr3d.views.analytic
-
-Аналитическое представление вида:
-  - 2D-вершины и 2D-рёбра в координатах вида (ξ, η)
-  - связь с 3D-топологией (vertex_index, edge_index, face_index)
-  - оценка видимости рёбер и вершин по видимости граней (z-buffer)
-
-Зависит от:
-  - afr3d.views.visibility.FaceVisibilityResult (или MultiViewFaceVisibility)
-  - gp_Ax2 вида (та же система, что для HLR)
-"""
-
 from __future__ import annotations
 
-from collections import Counter, defaultdict
-from dataclasses import dataclass, field
-from typing import Dict, List, Tuple, Optional, Set, Literal
-
 import math
+
+from dataclasses import dataclass, field
+from typing import Dict, List, Tuple, Optional, Set, Literal, Sequence
 
 from OCC.Core.gp import gp_Pnt, gp_Vec, gp_Ax2
 from OCC.Core.BRep import BRep_Tool
@@ -49,9 +35,13 @@ from OCC.Core.TopAbs import TopAbs_VERTEX, TopAbs_EDGE, TopAbs_FACE
 from OCC.Core.TopExp import TopExp_Explorer, topexp as TopExp
 from OCC.Core.TopTools import TopTools_IndexedMapOfShape
 
+from OCC.Core.HLRBRep import HLRBRep_Algo, HLRBRep_HLRToShape
+from OCC.Core.HLRAlgo import HLRAlgo_Projector
+from OCC.Core.TopAbs import TopAbs_EDGE
+from OCC.Core.TopExp import TopExp_Explorer
+
 from afr3d.views.visibility import FaceVisibilityResult, compute_face_visibility_by_zbuffer
 from afr3d.views.orientation import make_default_front_top_side_ax2
-from afr3d.views.utils import sample_hlr_edge_2d
 
 # ---------------------------------------------------------------------------
 # Вспомогательные функции
@@ -239,26 +229,6 @@ class AnalyticView2D:
     edges: Dict[int, DraftEdge2D]
 
     faces: Dict[int, DraftFaceInfo]
-
-@dataclass
-class DraftEdgeSegment2D:
-    """
-    Отрезок (сегмент) одного аналитического ребра, уже
-    классифицированный по видимости на основе HLR.
-
-    parent_edge_index:
-        индекс исходного DraftEdge2D
-    points:
-        точки полилинии этого сегмента (подмассив от DraftEdge2D.points)
-    visibility:
-        'visible', 'hidden', 'silhouette'
-    line_style:
-        'solid', 'hidden', 'solid_thick', ...
-    """
-    parent_edge_index: int
-    points: List[Tuple[float, float]]
-    visibility: str
-    line_style: str
 
 # ---------------------------------------------------------------------------
 # Фильтры
@@ -471,6 +441,291 @@ def collect_projected_edges(
 
 
 # ---------------------------------------------------------------------------
+# HLR-проекция в координатах конкретного вида (gp_Ax2)
+# ---------------------------------------------------------------------------
+
+def _run_hlr_for_ax2(shape: TopoDS_Shape, view_ax2: gp_Ax2):
+    """
+    Запускает HLR для заданного вида (gp_Ax2).
+    Важно: используем тот же Ax2, что и analytic-view, чтобы система координат
+    совпадала.
+
+    Возвращает объект HLRBRep_HLRToShape, из которого можно взять:
+      VCompound(), HCompound(), OutLineVCompound(), OutLineHCompound(),
+      Rg1LineV/H, RgNLineV/H.
+    """
+    projector = HLRAlgo_Projector(view_ax2)
+
+    algo = HLRBRep_Algo()
+    algo.Add(shape)
+    algo.Projector(projector)
+    algo.Update()
+    algo.Hide()
+
+    return HLRBRep_HLRToShape(algo)
+
+
+def _sample_hlr_compound_2d(
+    comp,
+    view_ax2: gp_Ax2,
+    n_samples: int = 16,
+) -> list[list[tuple[float, float]]]:
+    """
+    Достаёт из одного compound’а все EDGE и дискретизирует их в 2D
+    (в координатах вида) через sample_edge_2d_from_shape.
+    Возвращает список полилиний: [ [(x,y), ...], ... ].
+    """
+    polylines: list[list[tuple[float, float]]] = []
+    if comp is None or comp.IsNull():
+        return polylines
+
+    exp = TopExp_Explorer(comp, TopAbs_EDGE)
+    while exp.More():
+        e = topods.Edge(exp.Current())
+        pts = sample_edge_2d_from_shape(e, view_ax2, n_samples=n_samples)
+        if len(pts) >= 2:
+            polylines.append(pts)
+        exp.Next()
+
+    return polylines
+
+
+def _collect_hlr_polylines(
+    shape: TopoDS_Shape,
+    view_ax2: gp_Ax2,
+    n_samples: int = 16,
+):
+    """
+    Возвращает два списка полилиний:
+      - visible_polys
+      - hidden_polys
+
+    Каждый элемент — список (x,y) в координатах вида.
+    """
+    hlr_shapes = _run_hlr_for_ax2(shape, view_ax2)
+
+    visible_comps = [
+        hlr_shapes.VCompound(),
+        hlr_shapes.OutLineVCompound(),
+        hlr_shapes.Rg1LineVCompound(),
+        hlr_shapes.RgNLineVCompound(),
+    ]
+    hidden_comps = [
+        hlr_shapes.HCompound(),
+        hlr_shapes.OutLineHCompound(),
+        hlr_shapes.Rg1LineHCompound(),
+        hlr_shapes.RgNLineHCompound(),
+    ]
+
+    visible_polys: list[list[tuple[float, float]]] = []
+    hidden_polys: list[list[tuple[float, float]]] = []
+
+    for comp in visible_comps:
+        visible_polys.extend(_sample_hlr_compound_2d(comp, view_ax2, n_samples))
+    for comp in hidden_comps:
+        hidden_polys.extend(_sample_hlr_compound_2d(comp, view_ax2, n_samples))
+
+    return visible_polys, hidden_polys
+
+
+# ---------------------------------------------------------------------------
+# Простой 2D spatial-index по регулярной сетке
+# ---------------------------------------------------------------------------
+
+class _PointGridIndex:
+    """
+    Очень простой spatial index для 2D-точек:
+      - строит bbox по всем точкам;
+      - делит его на grid_size x grid_size ячеек;
+      - для каждой ячейки хранит список индексов точек.
+
+    Используется только для поиска ближайшей точки к заданной (x,y)
+    в небольшой окрестности ячеек.
+    """
+
+    def __init__(self, points: list[tuple[float, float]], grid_size: int = 128):
+        self.points = points
+        self.grid_size = grid_size
+        self.cells: dict[tuple[int, int], list[int]] = {}
+
+        if not points:
+            self.xmin = self.xmax = 0.0
+            self.ymin = self.ymax = 0.0
+            return
+
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
+        self.xmin, self.xmax = min(xs), max(xs)
+        self.ymin, self.ymax = min(ys), max(ys)
+
+        dx = self.xmax - self.xmin
+        dy = self.ymax - self.ymin
+        if dx == 0.0:
+            dx = 1.0
+        if dy == 0.0:
+            dy = 1.0
+        self.dx = dx
+        self.dy = dy
+
+        for i, (x, y) in enumerate(points):
+            ix, iy = self._cell_index(x, y)
+            self.cells.setdefault((ix, iy), []).append(i)
+
+    def _cell_index(self, x: float, y: float) -> tuple[int, int]:
+        gx = (x - self.xmin) / self.dx
+        gy = (y - self.ymin) / self.dy
+        ix = int(gx * (self.grid_size - 1))
+        iy = int(gy * (self.grid_size - 1))
+        ix = max(0, min(self.grid_size - 1, ix))
+        iy = max(0, min(self.grid_size - 1, iy))
+        return ix, iy
+
+    def nearest_distance(self, x: float, y: float, max_cell_radius: int = 1) -> float:
+        """
+        Возвращает расстояние до ближайшей точки (из self.points).
+
+        max_cell_radius=1 означает, что мы смотрим ячейку (ix,iy)
+        и её 8 соседей (окрестность 3x3). Этого обычно достаточно
+        при разумном grid_size.
+        """
+        if not self.points:
+            return float("inf")
+
+        ix0, iy0 = self._cell_index(x, y)
+        best_d2 = float("inf")
+
+        for dx in range(-max_cell_radius, max_cell_radius + 1):
+            for dy in range(-max_cell_radius, max_cell_radius + 1):
+                ix = ix0 + dx
+                iy = iy0 + dy
+                if ix < 0 or iy < 0 or ix >= self.grid_size or iy >= self.grid_size:
+                    continue
+                cell_pts = self.cells.get((ix, iy))
+                if not cell_pts:
+                    continue
+                for idx in cell_pts:
+                    px, py = self.points[idx]
+                    ddx = px - x
+                    ddy = py - y
+                    d2 = ddx * ddx + ddy * ddy
+                    if d2 < best_d2:
+                        best_d2 = d2
+
+        return best_d2 ** 0.5
+
+
+# ---------------------------------------------------------------------------
+# Слияние видимости analytic-view с эталонным HLR
+# ---------------------------------------------------------------------------
+
+
+def fuse_visibility_with_hlr(
+    shape: TopoDS_Shape,
+    view: AnalyticView2D,
+    *,
+    hlr_edge_samples: int = 16,
+    tol: float = 1e-3,
+    grid_size: int = 128,
+):
+    """
+    Обновляет поля visibility / line_style у DraftEdge2D в AnalyticView2D
+    по данным "чистого" HLR.
+
+    Логика:
+      1) строим HLR для этого вида (view.ax2);
+      2) дискретизируем HLR-рёбра в 2D (visible_polys, hidden_polys);
+      3) делаем spatial-index по всем HLR-точкам видимых и скрытых линий;
+      4) для каждой точки аналитического ребра ищем ближайшую HLR-точку:
+         - если dist < tol в visible: считаем "попадание в видимый HLR";
+         - если dist < tol в hidden: считаем "попадание в скрытый HLR";
+      5) по числу попаданий (vis_hits / hid_hits) классифицируем ребро:
+         - vis>0, hid==0 -> "visible";
+         - vis==0, hid>0 -> "hidden";
+         - vis>0, hid>0  -> "silhouette";
+         - оба 0         -> оставляем, как есть (по z-buffer).
+      6) пересчитываем видимость вершин (visible=True, если есть хотя бы
+         одно ребро visibility in {'visible', 'silhouette'}).
+
+    Важно:
+      - предполагается, что view.ax2 та же система, что и для выбора вида
+        в HLR (мы именно её и используем).
+    """
+
+    # 1–2. HLR-полилинии
+    visible_polys, hidden_polys = _collect_hlr_polylines(
+        shape,
+        view.ax2,
+        n_samples=hlr_edge_samples,
+    )
+
+    visible_pts = [pt for poly in visible_polys for pt in poly]
+    hidden_pts  = [pt for poly in hidden_polys  for pt in poly]
+
+    vis_index = _PointGridIndex(visible_pts, grid_size=grid_size)
+    hid_index = _PointGridIndex(hidden_pts,  grid_size=grid_size)
+
+    # 3. Обновляем видимость рёбер
+    for e in view.edges.values():
+        if not e.points:
+            continue
+
+        vis_hits = 0
+        hid_hits = 0
+
+        for (x, y) in e.points:
+            dv = vis_index.nearest_distance(x, y)
+            dh = hid_index.nearest_distance(x, y)
+
+            if dv < tol:
+                vis_hits += 1
+            if dh < tol:
+                hid_hits += 1
+
+        # нет попаданий ни в видимый, ни в скрытый HLR — оставляем как было
+        if vis_hits == 0 and hid_hits == 0:
+            continue
+
+        if vis_hits > 0 and hid_hits == 0:
+            e.visibility = "visible"
+        elif vis_hits == 0 and hid_hits > 0:
+            e.visibility = "hidden"
+        else:
+            # есть попадания и туда, и туда — считаем, что это силует /
+            # переходная зона; в практике HLR это редко, но при дискретизации
+            # возможно
+            e.visibility = "silhouette"
+
+        # line_style как и раньше
+        if e.visibility == "visible":
+            e.line_style = "solid"
+        elif e.visibility == "hidden":
+            e.line_style = "hidden"
+        elif e.visibility == "silhouette":
+            e.line_style = "solid_thick"
+        else:
+            e.line_style = "default"
+
+    # 4. Пересчёт видимости вершин по обновлённым рёбрам
+    for v in view.vertices.values():
+        v.incident_edges.clear()
+        v.visible = False
+
+    for e_idx, e in view.edges.items():
+        for v_idx in (e.v_start, e.v_end):
+            if v_idx is None:
+                continue
+            if v_idx in view.vertices:
+                view.vertices[v_idx].incident_edges.append(e_idx)
+
+    visible_edge_states = {"visible", "silhouette"}
+    for v in view.vertices.values():
+        for e_idx in v.incident_edges:
+            if view.edges[e_idx].visibility in visible_edge_states:
+                v.visible = True
+                break
+
+
+# ---------------------------------------------------------------------------
 # Присвоение видимости рёбер и вершин по видимости граней
 # ---------------------------------------------------------------------------
 
@@ -550,370 +805,6 @@ def assign_visibility_to_edges_and_vertices(
                 break
 
 
-def _collect_hlr_samples(
-    projection: Dict[str, TopoDS_Shape],
-    n_samples: int = 32,
-) -> List[Tuple[float, float, str]]:
-    """
-    Строит плоское облако точек HLR с метками:
-
-        'vis'          — видимая внутренняя линия
-        'hid'          — скрытая внутренняя линия
-        'vis_outline'  — видимый контур (outline)
-        'hid_outline'  — скрытый контур (outline)
-
-    Координаты уже в плоскости вида (совпадают с аналитическим видом).
-    """
-    pts: List[Tuple[float, float, str]] = []
-
-    type_map = [
-        ("visible",         "vis"),
-        ("hidden",          "hid"),
-        ("outline_visible", "vis_outline"),
-        ("outline_hidden",  "hid_outline"),
-    ]
-
-    for key, label in type_map:
-        comp = projection.get(key)
-        if comp is None or comp.IsNull():
-            continue
-
-        exp = TopExp_Explorer(comp, TopAbs_EDGE)
-        while exp.More():
-            edge = exp.Current()
-            exp.Next()
-
-            edge_pts = sample_hlr_edge_2d(edge, n_samples=n_samples)
-            for x, y in edge_pts:
-                pts.append((x, y, label))
-
-    return pts
-
-
-def classify_edge_samples_by_hlr(
-    view: AnalyticView2D,
-    projection: Dict[str, TopoDS_Shape],
-    *,
-    n_samples_hlr: int = 32,
-    tol_factor: float = 1e-3,
-) -> Dict[int, List[str]]:
-    """
-    Возвращает labels_per_edge:
-        edge_index -> [label_0, ..., label_{n-1}]
-
-    label_i ∈ {'vis', 'hid', 'vis_outline', 'hid_outline'}.
-    'none' используется ТОЛЬКО если HLR вообще не дал ни одной точки.
-    """
-    hlr_pts = _collect_hlr_samples(projection, n_samples=n_samples_hlr)
-
-    labels_per_edge: Dict[int, List[str]] = {}
-
-    if not hlr_pts:
-        # HLR пустой — всё помечаем как none
-        for e_idx, e in view.edges.items():
-            labels_per_edge[e_idx] = ["none"] * len(e.points)
-        return labels_per_edge
-
-    # --- масштаб по bbox (аналитический вид + HLR) ---
-    xs = [p[0] for p in hlr_pts]
-    ys = [p[1] for p in hlr_pts]
-    for e in view.edges.values():
-        for (x, y) in e.points:
-            xs.append(x)
-            ys.append(y)
-
-    x_min, x_max = min(xs), max(xs)
-    y_min, y_max = min(ys), max(ys)
-    dx = x_max - x_min
-    dy = y_max - y_min
-    diag = math.hypot(dx, dy) or 1.0
-
-    tol = tol_factor * diag
-    tol2 = tol * tol
-
-    for e_idx, e in view.edges.items():
-        pts = e.points
-        if not pts:
-            labels_per_edge[e_idx] = []
-            continue
-
-        labels: List[str] = []
-
-        for (x, y) in pts:
-            best_label = None
-            best_d2 = None
-
-            # ищем ближайший HLR-семпл
-            for (hx, hy, hlabel) in hlr_pts:
-                dx = x - hx
-                dy = y - hy
-                d2 = dx * dx + dy * dy
-                if best_d2 is None or d2 < best_d2:
-                    best_d2 = d2
-                    best_label = hlabel
-
-            # ВАЖНО:
-            #  - если даже ближайшая точка далеко, всё равно используем её метку:
-            #    это лучше, чем 'none', который рвёт сегменты.
-            #  - tol оставляем только на случай HLR-артефактов, если хочешь —
-            #    можно добавить второй порог и при best_d2 >> tol2 считать 'vis'.
-            if best_label is None:
-                labels.append("vis")  # fallback
-            else:
-                labels.append(best_label)
-
-        labels_per_edge[e_idx] = labels
-
-    return labels_per_edge
-
-
-def build_edge_segments_from_labels(
-    view: AnalyticView2D,
-    labels_per_edge: Dict[int, List[str]],
-    *,
-    min_run: int = 3,
-    fallback_visibility: Optional[Dict[int, str]] = None,
-) -> List[DraftEdgeSegment2D]:
-    """
-    Строит сегменты рёбер по меткам HLR с простым сглаживанием +
-    ГАРАНТИРУЕТ, что ни одно ребро не "пропадёт":
-
-      - если по ребру не удалось построить ни одного сегмента,
-        создаётся fallback-сегмент на всю длину ребра с исходной
-        видимостью (fallback_visibility[e_idx]).
-
-    min_run:
-        минимальное количество подряд идущих точек с новым классом,
-        чтобы начать новый сегмент. Короткие "островки" считаем шумом.
-    """
-    segments: List[DraftEdgeSegment2D] = []
-    has_segment_for_edge: Dict[int, bool] = defaultdict(bool)
-
-    def label_to_vis_style(lbl: str) -> Optional[Tuple[str, str]]:
-        if lbl == "vis":
-            return "visible", "solid"
-        if lbl == "hid":
-            return "hidden", "hidden"
-        if lbl == "vis_outline":
-            return "silhouette", "solid_thick"
-        if lbl == "hid_outline":
-            return "hidden", "hidden"
-        return None  # 'none' и прочие
-
-    # --- 1. Основная сегментация по HLR-меткам ---
-    for e_idx, e in view.edges.items():
-        pts = e.points
-        if len(pts) < 2:
-            continue
-
-        labels = labels_per_edge.get(e_idx)
-        if not labels or len(labels) != len(pts):
-            continue
-
-        # --- предварительное сглаживание ---
-        cleaned = labels.copy()
-        n = len(cleaned)
-
-        # 1) 'none' -> соседний класс, если оба соседа совпадают
-        for i in range(1, n - 1):
-            if cleaned[i] == "none":
-                if cleaned[i - 1] == cleaned[i + 1] and cleaned[i - 1] != "none":
-                    cleaned[i] = cleaned[i - 1]
-
-        # 2) run-length сглаживание: короткие островки < min_run затираем
-        i = 0
-        while i < n:
-            lbl = cleaned[i]
-            j = i + 1
-            while j < n and cleaned[j] == lbl:
-                j += 1
-            run_len = j - i
-            if lbl != "none" and run_len < min_run:
-                left = cleaned[i - 1] if i - 1 >= 0 else None
-                right = cleaned[j] if j < n else None
-                if left is not None and left == right and left != "none":
-                    for k in range(i, j):
-                        cleaned[k] = left
-            i = j
-
-        # --- строим сегменты по cleaned ---
-        current_lbl = None
-        current_vis = None
-        current_style = None
-        start_idx = 0
-
-        for idx in range(n):
-            lbl = cleaned[idx]
-            vs = label_to_vis_style(lbl)
-
-            if vs is None:
-                # нет валидного класса — закрываем сегмент, если был
-                if current_vis is not None and idx - start_idx >= 2:
-                    seg_points = pts[start_idx:idx]
-                    segments.append(
-                        DraftEdgeSegment2D(
-                            parent_edge_index=e_idx,
-                            points=seg_points,
-                            visibility=current_vis,
-                            line_style=current_style,
-                        )
-                    )
-                    has_segment_for_edge[e_idx] = True
-
-                current_lbl = None
-                current_vis = None
-                current_style = None
-                start_idx = idx + 1
-                continue
-
-            vis, style = vs
-
-            if current_lbl is None:
-                current_lbl = lbl
-                current_vis = vis
-                current_style = style
-                start_idx = idx
-            elif lbl != current_lbl:
-                # смена класса -> закрываем старый сегмент
-                if current_vis is not None and idx - start_idx >= 2:
-                    seg_points = pts[start_idx:idx]
-                    segments.append(
-                        DraftEdgeSegment2D(
-                            parent_edge_index=e_idx,
-                            points=seg_points,
-                            visibility=current_vis,
-                            line_style=current_style,
-                        )
-                    )
-                    has_segment_for_edge[e_idx] = True
-
-                current_lbl = lbl
-                current_vis = vis
-                current_style = style
-                start_idx = idx
-
-        # хвост
-        if current_vis is not None and n - start_idx >= 2:
-            seg_points = pts[start_idx:n]
-            segments.append(
-                DraftEdgeSegment2D(
-                    parent_edge_index=e_idx,
-                    points=seg_points,
-                    visibility=current_vis,
-                    line_style=current_style,
-                )
-            )
-            has_segment_for_edge[e_idx] = True
-
-    # --- 2. Fallback: рёбра без сегментов восстанавливаем целиком ---
-    for e_idx, e in view.edges.items():
-        if has_segment_for_edge[e_idx]:
-            continue  # по ребру уже есть сегменты
-
-        if len(e.points) < 2:
-            continue
-
-        # 1) пробуем вывести видимость по HLR-меткам для этого ребра
-        labels = labels_per_edge.get(e_idx, [])
-        hlr_vis = None
-        if labels:
-            # считаем частоты
-            cnt = Counter(labels)
-            # убираем явный мусор
-            for noise in ("none",):
-                cnt.pop(noise, None)
-
-            if cnt:
-                # берём наиболее частый HLR-label и маппим в visible/hidden
-                hlr_label, _ = cnt.most_common(1)[0]
-
-                # та же функция, что мы уже используем:
-                # vis_outline -> 'visible' или 'silhouette' — здесь можно
-                # сделать выбор, как тебе удобнее.
-                if hlr_label in ("vis", "vis_outline"):
-                    hlr_vis = "visible"
-                elif hlr_label in ("hid", "hid_outline"):
-                    hlr_vis = "hidden"
-
-        # 2) если HLR дал понятный ответ — используем его
-        if hlr_vis is not None:
-            vis = hlr_vis
-        else:
-            # 3) иначе откатываемся к старой видимости
-            vis = None
-            if fallback_visibility is not None:
-                vis = fallback_visibility.get(e_idx)
-
-            if vis is None or vis == "unknown":
-                vis = "visible"
-
-        # 4) line_style по vis
-        if vis == "visible":
-            style = "solid"
-        elif vis == "hidden":
-            style = "hidden"
-        elif vis == "silhouette":
-            style = "solid_thick"
-        else:
-            style = "solid"
-
-        seg = DraftEdgeSegment2D(
-            parent_edge_index=e_idx,
-            points=e.points,
-            visibility=vis,
-            line_style=style,
-        )
-        segments.append(seg)
-
-    return segments
-
-
-def build_outline_segments_from_hlr(
-    projection: Dict[str, TopoDS_Shape],
-    *,
-    n_samples: int = 64,
-) -> List[DraftEdgeSegment2D]:
-    """
-    Строит сегменты только по HLR-линиям, которые могут не иметь
-    соответствующих BRep-ребер (силуэты, контуры и т.п.).
-
-    Возвращает список DraftEdgeSegment2D с parent_edge_index = -1.
-    """
-    segments: List[DraftEdgeSegment2D] = []
-
-    def add_from_compound(comp: Optional[TopoDS_Shape], visibility: str, line_style: str):
-        if comp is None or comp.IsNull():
-            return
-        exp = TopExp_Explorer(comp, TopAbs_EDGE)
-        while exp.More():
-            edge = exp.Current()
-            exp.Next()
-
-            pts = sample_hlr_edge_2d(edge, n_samples=n_samples)
-            if len(pts) < 2:
-                continue
-
-            seg = DraftEdgeSegment2D(
-                parent_edge_index=-1,   # нет исходного DraftEdge2D
-                points=pts,
-                visibility=visibility,
-                line_style=line_style,
-            )
-            segments.append(seg)
-
-    # контуры / силуэты
-    outline_vis = projection.get("outline_visible")
-    outline_hid = projection.get("outline_hidden")
-
-    # видимые силуэты/контуры — как silhouette или просто видимые толстые линии
-    add_from_compound(outline_vis, visibility="silhouette", line_style="solid_thick")
-
-    # скрытые силуэты/контуры — как штриховые
-    add_from_compound(outline_hid, visibility="hidden", line_style="hidden")
-
-    return segments
-
-
 # ---------------------------------------------------------------------------
 # Высокоуровневая функция: построение аналитического вида
 # ---------------------------------------------------------------------------
@@ -922,7 +813,7 @@ def build_analytic_view_2d(
     shape: TopoDS_Shape,
     view_ax2: gp_Ax2,
     view_name: str = "front",
-    face_visibility: Optional[FaceVisibilityResult] = None,
+    face_visibility: Optional["FaceVisibilityResult"] = None,
     *,
     n_edge_samples: int = 32,
 ) -> AnalyticView2D:
@@ -962,12 +853,12 @@ def build_analytic_view_2d(
 
     # 3. Видимость по граням (z-buffer)
     if face_visibility is not None:
-        assign_visibility_to_edges_and_vertices(
-            proj_edges, proj_vertices, face_visibility=face_visibility
-        )
+        assign_visibility_to_edges_and_vertices(proj_edges, proj_vertices, face_visibility=face_visibility)
 
-    # 3b. Информация по граням (работает и при face_visibility=None)
-    face_infos = collect_face_infos(face_map, face_visibility)
+    # ИНФО!
+        face_infos = collect_face_infos(face_map, face_visibility)
+    else:
+        face_infos = None
 
     # 4. Собираем AnalyticView2D
     view = AnalyticView2D(
@@ -978,17 +869,14 @@ def build_analytic_view_2d(
         face_map=face_map,
         vertices=proj_vertices,
         edges=proj_edges,
-        faces=face_infos,
+        faces=face_infos
     )
 
     # заполняем surface_types
     for e in proj_edges.values():
-        e.surface_types = [
-            view.faces[fi].surface_type
-            for fi in e.face_indices
-            if fi in view.faces
-        ]
-
+        e.surface_types = [view.faces[fi].surface_type for fi in e.face_indices 
+                           if fi in view.faces]
+    
     return view
 
 
