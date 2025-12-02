@@ -19,7 +19,8 @@ python -m ipykernel install --user --name occ_env --display-name "occ_env"
 
 Basic part analysis: 
 1 conda activate occ_env
-2 C:\Users\dreck\Documents\make_drafting\src>python -m afr3d ..\data\example_complex.stp
+2 cd src
+3 python -m afr3d ..\data\example_complex.stp
 ---
 
 ## 0. Technology Stack

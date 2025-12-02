@@ -164,47 +164,47 @@ def sample_face_edge_2d(edge, ax2: gp_Ax2, n_samples: int = 32):
     return pts_2d
 
 
-def draw_hlr_compound_by_type(ax, compound,
-                              visible=True,
-                              is_outline=False):
-    """
-    Рисуем HLR-shape. НЕ используем ax2 — координаты уже в плоскости вида.
-    """
-    if compound is None or compound.IsNull():
-        return
+# def draw_hlr_compound_by_type(ax, compound, This function modified in debug.py
+#                               visible=True,
+#                               is_outline=False):
+#     """
+#     Рисуем HLR-shape. НЕ используем ax2 — координаты уже в плоскости вида.
+#     """
+#     if compound is None or compound.IsNull():
+#         return
 
-    exp = TopExp_Explorer(compound, TopAbs_EDGE)
-    legend_done = set()
+#     exp = TopExp_Explorer(compound, TopAbs_EDGE)
+#     legend_done = set()
 
-    while exp.More():
-        edge = exp.Current()
-        exp.Next()
+#     while exp.More():
+#         edge = exp.Current()
+#         exp.Next()
 
-        try:
-            bac = BRepAdaptor_Curve(edge)
-            ctype = bac.GetType()
-        except Exception:
-            continue
+#         try:
+#             bac = BRepAdaptor_Curve(edge)
+#             ctype = bac.GetType()
+#         except Exception:
+#             continue
 
-        tname = curve_type_name(ctype)
-        color = COLOR_BY_TYPE.get(tname, "gray")
+#         tname = curve_type_name(ctype)
+#         color = COLOR_BY_TYPE.get(tname, "gray")
 
-        pts_2d = sample_hlr_edge_2d(edge)
-        if len(pts_2d) < 2:
-            continue
+#         pts_2d = sample_hlr_edge_2d(edge)
+#         if len(pts_2d) < 2:
+#             continue
 
-        xs = [p[0] for p in pts_2d]
-        ys = [p[1] for p in pts_2d]
+#         xs = [p[0] for p in pts_2d]
+#         ys = [p[1] for p in pts_2d]
 
-        linestyle = "-" if visible else "--"
-        alpha = 1.0 if visible else 0.4
-        linewidth = 2.0 if is_outline else 0.8
+#         linestyle = "-" if visible else "--"
+#         alpha = 1.0 if visible else 0.4
+#         linewidth = 2.0 if is_outline else 0.8
 
-        ax.plot(xs, ys,
-                color=color,
-                linestyle=linestyle,
-                alpha=alpha,
-                linewidth=linewidth)
+#         ax.plot(xs, ys,
+#                 color=color,
+#                 linestyle=linestyle,
+#                 alpha=alpha,
+#                 linewidth=linewidth)
 
 
 def draw_analytic_view_edges(
